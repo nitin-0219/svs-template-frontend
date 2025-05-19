@@ -3,7 +3,8 @@ import { useForm, Controller } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { format } from "date-fns";
-import { Calendar } from "lucide-react";
+import { Calendar, FileText, PenTool, Clock } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 
 import { Button } from "./ui/button";
 import {
@@ -32,12 +33,19 @@ import FileUploader from "./FileUploader";
 import JsonInputField from "./JsonInputField";
 import PdfEditor from "./PdfEditor";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "./ui/dialog";
+import { Label } from "./ui/label";
 
 const formSchema = z
   .object({
     templateName: z.string().min(1, { message: "Template name is required" }),
-    validFrom: z.date({ required_error: "Valid from date is required" }),
-    validTo: z.date({ required_error: "Valid to date is required" }),
+    validFrom: z.date(), // Remove validation requirements
+    validTo: z
+      .date({ required_error: "Valid to date and time is required" })
+      .refine((date) => {
+        const now = new Date();
+        return date >= now;
+      }, "Valid to date must be in the future"),
     pdfFile: z
       .instanceof(File, { message: "PDF file is required" })
       .refine((file) => file.type === "application/pdf", {
@@ -72,18 +80,29 @@ const formSchema = z
         { message: "Fabric must be valid JSON" },
       ),
   })
-  .refine((data) => data.validTo >= data.validFrom, {
-    message: "Valid to date must be after valid from date",
+  .refine((data) => {
+    const validTo = new Date(data.validTo);
+    const now = new Date();
+    const minDiff = 1000 * 60 * 5; // 5 minutes minimum difference
+    return validTo.getTime() - now.getTime() >= minDiff;
+  }, {
+    message: "Valid to date must be at least 5 minutes from now",
     path: ["validTo"],
   });
 
 type FormValues = z.infer<typeof formSchema>;
 
-const TemplateForm = () => {
+export function TemplateForm() {
+  const navigate = useNavigate();
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [activeTab, setActiveTab] = useState<"details" | "editor">("details");
   const [uploadedPdfFile, setUploadedPdfFile] = useState<File | null>(null);
+  const [showDateDialog, setShowDateDialog] = useState(false);
   const { toast } = useToast();
+
+  const now = new Date();
+  const tomorrow = new Date(now);
+  tomorrow.setHours(tomorrow.getHours() + 24);
 
   const form = useForm<FormValues>({
     resolver: zodResolver(formSchema),
@@ -91,22 +110,83 @@ const TemplateForm = () => {
       templateName: "",
       config: "",
       fabric: "",
+      validFrom: now,
+      validTo: tomorrow,
     },
   });
 
+  const getCurrentDateTime = () => {
+    const now = new Date();
+    return format(now, "yyyy-MM-dd'T'HH:mm");
+  };
+
+  const formatDisplayDateTime = (date: Date) => {
+    return format(date, "PPP 'at' p");
+  };
+
+  const getFormDate = (field: 'validFrom' | 'validTo'): Date => {
+    const value = form.getValues(field);
+    return value || new Date();
+  };
+
+  const handleSuccessfulCreation = (templateName: string) => {
+    toast({
+      title: "Success!",
+      description: "Template created successfully",
+      variant: "default",
+    });
+
+    toast({
+      title: "What would you like to do next?",
+      description:
+        "You can create a document using this template or create another template.",
+      action: (
+        <div className="mt-2 flex gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() =>
+              navigate("/create-document", {
+                state: { justCreated: true, templateName },
+              })
+            }
+          >
+            Create Document
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              form.reset();
+              setActiveTab("details");
+              setUploadedPdfFile(null);
+            }}
+          >
+            New Template
+          </Button>
+        </div>
+      ),
+      duration: 10000,
+    });
+  };
+
   const onSubmit = async (data: FormValues) => {
     setIsSubmitting(true);
+    setShowDateDialog(false);
 
     try {
-      // Convert config and fabric JSON to base64 encoded strings
       const configBase64 = btoa(data.config);
       const fabricBase64 = btoa(data.fabric);
 
+      const formatDate = (date: Date) => {
+        return format(date, "yyyy-MM-dd HH:mm:ss");
+      };
+
       const formData = new FormData();
       formData.append("templateName", data.templateName);
-      formData.append("validFrom", data.validFrom.toISOString());
-      formData.append("validTo", data.validTo.toISOString());
-      formData.append("pdfFile", data.pdfFile);
+      formData.append("validFrom", formatDate(data.validFrom));
+      formData.append("validTo", formatDate(data.validTo));
+      formData.append("mainFile", data.pdfFile);
       formData.append("config", configBase64);
       formData.append("fabric", fabricBase64);
 
@@ -118,18 +198,30 @@ const TemplateForm = () => {
         },
       );
 
+      const responseData = await response.json();
+
       if (!response.ok) {
-        throw new Error(`Error: ${response.status}`);
+        if (
+          response.status === 409 ||
+          responseData.message?.includes("already exists")
+        ) {
+          form.setError("templateName", {
+            type: "manual",
+            message:
+              "A template with this name already exists. Please choose a different name.",
+          });
+          toast({
+            title: "Template Name Error",
+            description:
+              "A template with this name already exists. Please choose a different name.",
+            variant: "destructive",
+          });
+          return;
+        }
+        throw new Error(responseData.message || `Error: ${response.status}`);
       }
 
-      toast({
-        title: "Success",
-        description: "Template created successfully",
-        variant: "default",
-      });
-
-      // Reset form after successful submission
-      form.reset();
+      handleSuccessfulCreation(data.templateName);
     } catch (error) {
       console.error("Submission error:", error);
       toast({
@@ -158,7 +250,6 @@ const TemplateForm = () => {
     if (file) {
       form.setValue("pdfFile", file);
       setUploadedPdfFile(file);
-      // Automatically switch to editor tab when PDF is uploaded
       setActiveTab("editor");
     } else {
       form.setValue("pdfFile", null as any);
@@ -166,232 +257,210 @@ const TemplateForm = () => {
     }
   };
 
+  const handleSubmitClick = (e: React.MouseEvent) => {
+    e.preventDefault();
+    setShowDateDialog(true);
+  };
+
+  const handleDateSubmit = () => {
+    const validTo = form.getValues().validTo;
+
+    if (!validTo) {
+      toast({
+        title: "Error",
+        description: "Please select an end date",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setShowDateDialog(false);
+    form.handleSubmit(onSubmit)();
+  };
+
   return (
-    <Card className="w-full max-w-4xl mx-auto bg-white shadow-lg">
-      <CardHeader>
-        <CardTitle className="text-2xl font-bold">Create Template</CardTitle>
-        <CardDescription>
-          Fill out the form below to create a new template. All fields are
-          required.
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        <Tabs
-          value={activeTab}
-          onValueChange={(value) => setActiveTab(value as "details" | "editor")}
-        >
-          <TabsList className="grid w-full grid-cols-2 mb-6">
-            <TabsTrigger value="details">Template Details</TabsTrigger>
-            <TabsTrigger value="editor" disabled={!uploadedPdfFile}>
-              PDF Editor
-            </TabsTrigger>
-          </TabsList>
+    <div className="relative w-full">
+      <div className="container mx-auto">
+        <Card className="w-full max-w-4xl mx-auto bg-white/95 shadow-xl">
+          <CardContent className="p-6">
+            <Tabs
+              value={activeTab}
+              onValueChange={(value) => setActiveTab(value as "details" | "editor")}
+              className="space-y-6"
+            >
+              <TabsList className="grid w-full grid-cols-2 bg-blue-50/50 p-1 rounded-lg">
+                <TabsTrigger 
+                  value="details"
+                  className="data-[state=active]:bg-white data-[state=active]:text-blue-600"
+                >
+                  <FileText className="w-4 h-4 mr-2" />
+                  Template Details
+                </TabsTrigger>
+                <TabsTrigger 
+                  value="editor"
+                  disabled={!uploadedPdfFile}
+                  className="data-[state=active]:bg-white data-[state=active]:text-blue-600"
+                >
+                  <PenTool className="w-4 h-4 mr-2" />
+                  PDF Editor
+                </TabsTrigger>
+              </TabsList>
 
-          <TabsContent value="details">
-            <Form {...form}>
-              <form
-                onSubmit={form.handleSubmit(onSubmit)}
-                className="space-y-6"
-              >
-                {/* Template Name */}
-                <FormField
-                  control={form.control}
-                  name="templateName"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Template Name</FormLabel>
-                      <FormControl>
-                        <Input placeholder="Enter template name" {...field} />
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-
-                {/* Date Range */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {/* Valid From Date */}
-                  <FormField
-                    control={form.control}
-                    name="validFrom"
-                    render={({ field }) => (
-                      <FormItem className="flex flex-col">
-                        <FormLabel>Valid From</FormLabel>
-                        <Popover>
-                          <PopoverTrigger asChild>
+              <TabsContent value="details">
+                <Form {...form}>
+                  <form className="space-y-8">
+                    {/* Template Name Section */}
+                    <div className="bg-gradient-to-r from-blue-50/50 to-indigo-50/50 p-6 rounded-xl border border-blue-100">
+                      <FormField
+                        control={form.control}
+                        name="templateName"
+                        render={({ field }) => (
+                          <FormItem>
+                            <FormLabel className="text-lg font-medium text-gray-700">Template Name</FormLabel>
                             <FormControl>
-                              <Button
-                                variant="outline"
-                                className={cn(
-                                  "w-full pl-3 text-left font-normal",
-                                  !field.value && "text-muted-foreground",
-                                )}
-                              >
-                                {field.value ? (
-                                  format(field.value, "PPP")
-                                ) : (
-                                  <span>Select date</span>
-                                )}
-                                <Calendar className="ml-auto h-4 w-4 opacity-50" />
-                              </Button>
+                              <Input 
+                                placeholder="Enter a descriptive name for your template" 
+                                className="bg-white/80"
+                                {...field} 
+                              />
                             </FormControl>
-                          </PopoverTrigger>
-                          <PopoverContent className="w-auto p-0" align="start">
-                            <CalendarComponent
-                              mode="single"
-                              selected={field.value}
-                              onSelect={field.onChange}
-                              disabled={(date) => date < new Date()}
-                              initialFocus
-                            />
-                          </PopoverContent>
-                        </Popover>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
-
-                  {/* Valid To Date */}
-                  <FormField
-                    control={form.control}
-                    name="validTo"
-                    render={({ field }) => (
-                      <FormItem className="flex flex-col">
-                        <FormLabel>Valid To</FormLabel>
-                        <Popover>
-                          <PopoverTrigger asChild>
-                            <FormControl>
-                              <Button
-                                variant="outline"
-                                className={cn(
-                                  "w-full pl-3 text-left font-normal",
-                                  !field.value && "text-muted-foreground",
-                                )}
-                              >
-                                {field.value ? (
-                                  format(field.value, "PPP")
-                                ) : (
-                                  <span>Select date</span>
-                                )}
-                                <Calendar className="ml-auto h-4 w-4 opacity-50" />
-                              </Button>
-                            </FormControl>
-                          </PopoverTrigger>
-                          <PopoverContent className="w-auto p-0" align="start">
-                            <CalendarComponent
-                              mode="single"
-                              selected={field.value}
-                              onSelect={field.onChange}
-                              disabled={(date) =>
-                                date <
-                                (form.getValues().validFrom || new Date())
-                              }
-                              initialFocus
-                            />
-                          </PopoverContent>
-                        </Popover>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
-                </div>
-
-                {/* PDF File Upload */}
-                <FormField
-                  control={form.control}
-                  name="pdfFile"
-                  render={({ field: { onChange, value, ...rest } }) => (
-                    <FormItem>
-                      <FormLabel>PDF Template</FormLabel>
-                      <FormControl>
-                        <FileUploader
-                          onFileChange={(file) => handlePdfFileUpload(file)}
-                          acceptedFileTypes="application/pdf"
-                          maxSize={10 * 1024 * 1024} // 10MB
-                          selectedFile={value as File}
-                        />
-                      </FormControl>
-                      <FormDescription>
-                        Upload a PDF file for your template. Maximum size: 10MB.
-                        {uploadedPdfFile && (
-                          <span className="block mt-2 text-sm text-blue-600">
-                            After uploading, switch to the PDF Editor tab to add
-                            signature fields, text fields, and date fields.
-                          </span>
+                            <FormDescription>
+                              This name will be used to identify your template
+                            </FormDescription>
+                            <FormMessage />
+                          </FormItem>
                         )}
-                      </FormDescription>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
+                      />
+                    </div>
 
-                {/* Config JSON */}
-                <FormField
-                  control={form.control}
-                  name="config"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Config JSON</FormLabel>
-                      <FormControl>
-                        <JsonInputField
-                          label="Config JSON"
-                          name="config"
-                          value={field.value}
-                          onChange={field.onChange}
-                          placeholder="Enter config JSON or upload a file"
-                        />
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
+                    {/* PDF Upload Section */}
+                    <div className="bg-gradient-to-r from-gray-50/50 to-blue-50/50 p-6 rounded-xl border border-gray-200">
+                      <FormField
+                        control={form.control}
+                        name="pdfFile"
+                        render={({ field: { onChange, value, ...rest } }) => (
+                          <FormItem>
+                            <FormLabel className="text-lg font-medium text-gray-700">Upload PDF</FormLabel>
+                            <FormControl>
+                              <FileUploader
+                                onFileChange={handlePdfFileUpload}
+                                acceptedFileTypes="application/pdf"
+                                maxSize={10 * 1024 * 1024}
+                                selectedFile={value as File}
+                              />
+                            </FormControl>
+                            <FormDescription>
+                              Select a PDF file to use as your template base (Max: 10MB)
+                              {uploadedPdfFile && (
+                                <p className="mt-2 text-sm text-blue-600">
+                                  ✓ PDF uploaded successfully. Switch to PDF Editor tab to add fields
+                                </p>
+                              )}
+                            </FormDescription>
+                            <FormMessage />
+                          </FormItem>
+                        )}
+                      />
+                    </div>
 
-                {/* Fabric JSON */}
-                <FormField
-                  control={form.control}
-                  name="fabric"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Fabric JSON</FormLabel>
-                      <FormControl>
-                        <JsonInputField
-                          label="Fabric JSON"
-                          name="fabric"
-                          value={field.value}
-                          onChange={field.onChange}
-                          placeholder="Enter fabric JSON or upload a file"
-                        />
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
+                    {/* Action Button */}
+                    <div className="flex justify-end pt-4">
+                      <Button
+                        type="button"
+                        onClick={handleSubmitClick}
+                        disabled={!form.getValues().pdfFile || isSubmitting}
+                        className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700"
+                      >
+                        <FileText className="h-4 w-4 mr-2" />
+                        {uploadedPdfFile ? 'Continue to Set Validity' : 'Upload PDF First'}
+                      </Button>
+                    </div>
+                  </form>
+                </Form>
+              </TabsContent>
 
-                <CardFooter className="px-0 pt-6">
-                  <Button
-                    type="submit"
-                    className="w-full md:w-auto"
-                    disabled={isSubmitting}
-                  >
-                    {isSubmitting ? "Creating Template..." : "Create Template"}
-                  </Button>
-                </CardFooter>
-              </form>
-            </Form>
-          </TabsContent>
+              <TabsContent value="editor" className="min-h-[600px] border rounded-xl p-4">
+                {uploadedPdfFile ? (
+                  <PdfEditor
+                    pdfFile={uploadedPdfFile}
+                    onSave={handlePdfEditorSave}
+                  />
+                ) : (
+                  <div className="flex items-center justify-center h-full text-gray-500">
+                    Please upload a PDF file first
+                  </div>
+                )}
+              </TabsContent>
+            </Tabs>
+          </CardContent>
+        </Card>
+      </div>
 
-          <TabsContent value="editor" className="border rounded-md">
-            <div className="h-[600px]">
-              <PdfEditor
-                pdfFile={uploadedPdfFile}
-                onSave={handlePdfEditorSave}
+      {/* Date Dialog */}
+      <Dialog open={showDateDialog} onOpenChange={setShowDateDialog}>
+        <DialogContent className="sm:max-w-[525px]">
+          <DialogHeader>
+            <DialogTitle className="text-2xl font-bold text-gray-900">
+              Set Template Validity Period
+            </DialogTitle>
+          </DialogHeader>
+          
+          <div className="grid gap-6 py-4">
+            {/* Valid From Field - Optional */}
+            <div className="space-y-2">
+              <Label className="text-sm text-gray-500">Start Time (Optional)</Label>
+              <Input
+                type="datetime-local"
+                defaultValue={format(getFormDate('validFrom'), "yyyy-MM-dd'T'HH:mm")}
+                onChange={(e) => {
+                  form.setValue("validFrom", new Date(e.target.value));
+                }}
+                className="w-full"
               />
             </div>
-          </TabsContent>
-        </Tabs>
-      </CardContent>
-    </Card>
-  );
-};
 
-export default TemplateForm;
+            {/* Valid To Field - Required */}
+            <div className="space-y-2">
+              <Label className="text-lg font-semibold text-gray-700">End Time (Required)</Label>
+              <Input
+                type="datetime-local"
+                defaultValue={format(getFormDate('validTo'), "yyyy-MM-dd'T'HH:mm")}
+                min={getCurrentDateTime()}
+                onChange={(e) => {
+                  form.setValue("validTo", new Date(e.target.value));
+                }}
+                className="w-full"
+                required
+              />
+              <p className="text-sm text-gray-500">Must be at least 5 minutes in the future</p>
+            </div>
+
+            {/* Duration Display */}
+            <div className="bg-blue-50 p-4 rounded-lg">
+              <p className="text-sm text-blue-700">
+                Template will expire on {format(getFormDate('validTo'), "PPp")}
+              </p>
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setShowDateDialog(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              onClick={handleDateSubmit}
+              className="bg-gradient-to-r from-blue-600 to-indigo-600"
+            >
+              Create Template
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
