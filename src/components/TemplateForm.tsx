@@ -3,7 +3,7 @@ import { useForm, Controller } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { format } from "date-fns";
-import { Calendar } from "lucide-react";
+import { Calendar, FileText } from "lucide-react";
 
 import { Button } from "./ui/button";
 import {
@@ -370,10 +370,20 @@ const TemplateForm = () => {
                 <CardFooter className="px-0 pt-6">
                   <Button
                     type="submit"
-                    className="w-full md:w-auto"
+                    className="w-full md:w-auto bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 transition-all duration-200"
                     disabled={isSubmitting}
                   >
-                    {isSubmitting ? "Creating Template..." : "Create Template"}
+                    {isSubmitting ? (
+                      <>
+                        <span className="animate-spin mr-2">⏳</span>
+                        Creating Template...
+                      </>
+                    ) : (
+                      <>
+                        <FileText className="h-4 w-4 mr-2" />
+                        Create Template
+                      </>
+                    )}
                   </Button>
                 </CardFooter>
               </form>
